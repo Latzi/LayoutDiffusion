@@ -167,19 +167,20 @@ class TrainLoop:
 
         micro_cond = {}
         for k, v in cond.items():
+            if k == "obj_class_name":
+                continue  # ✅ Ignore `obj_class_name` completely to suppress warnings
+            
             if isinstance(v, str) or v is None:
                 continue  # ❌ Skip strings and None values
             
             elif isinstance(v, list):
                 try:
-                    # ✅ Convert list of strings to a tensor-compatible format
                     if all(isinstance(item, str) for item in v):
                         micro_cond[k] = v  # Keep as list (avoid tensor conversion)
                     else:
                         micro_cond[k] = torch.tensor(v, device=dist_util.dev(), dtype=torch.float32)
                 except ValueError:
-                    print(f"⚠️ Skipping key '{k}' due to incompatible list format.")
-                    continue
+                    continue  # ✅ Silently skip incompatible lists
             
             elif isinstance(v, np.ndarray):  # ✅ Handle numpy arrays
                 micro_cond[k] = torch.from_numpy(v).to(dist_util.dev()).float()
@@ -188,12 +189,13 @@ class TrainLoop:
                 micro_cond[k] = v.to(dist_util.dev())
             
             else:
-                print(f"⚠️ Unknown type for key '{k}': {type(v)}. Skipping.")
+                continue  # ✅ Skip unknown types silently (no warning)
 
         t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
         losses = self.diffusion.training_losses(self.model, micro, t, model_kwargs=micro_cond)
         loss = (losses["loss"] * weights).mean()
         self.mp_trainer.backward(loss)
+
 
 
     def _update_ema(self):
