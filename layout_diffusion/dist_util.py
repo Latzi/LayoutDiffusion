@@ -1,66 +1,42 @@
 """
-Helpers for distributed training.
+Helpers for single-GPU training.
 """
 
 import io
 import os
 import socket
-
 import blobfile as bf
 import torch as th
-import torch.distributed as dist
 
-# Change this to reflect your cluster layout.
-# The GPU for a given rank is (rank % GPUS_PER_NODE).
-GPUS_PER_NODE = 8
-
-SETUP_RETRY_COUNT = 3
-
-
+# 🚀 Ensure distributed training is completely disabled
 def setup_dist(local_rank=0):
     """
     Completely disable distributed training for single-GPU.
     """
-    import torch as th
     th.cuda.set_device(local_rank)
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{local_rank}"
 
-    # 🚀 Fully disable distributed training
     print("🚨 Distributed training disabled. Running on a single GPU.")
-
-
-
 
 def dev():
     """
-    Get the device to use for torch.distributed.
+    Get the device to use for PyTorch computations.
     """
-    if th.cuda.is_available():
-        return th.device(f"cuda")
-    return th.device("cpu")
-
+    return th.device("cuda" if th.cuda.is_available() else "cpu")
 
 def load_state_dict(path, **kwargs):
     """
-    Load a PyTorch file
+    Load a PyTorch model state dictionary.
     """
-
     with bf.BlobFile(path, "rb") as f:
         data = f.read()
-
     return th.load(io.BytesIO(data), **kwargs)
 
-
-def sync_params(params):
-    """
-    Synchronize a sequence of Tensors across ranks from rank 0.
-    """
-    for p in params:
-        with th.no_grad():
-            dist.broadcast(p, 0)
-
-
+# 🚨 Removed all distributed-related calls, including sync_params()
 def _find_free_port():
+    """
+    Find a free port on the system.
+    """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("", 0))
