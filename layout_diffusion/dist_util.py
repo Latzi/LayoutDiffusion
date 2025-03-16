@@ -19,18 +19,16 @@ SETUP_RETRY_COUNT = 3
 
 def setup_dist(local_rank=0):
     """
-    Setup a distributed process group. 
-    If only one GPU is detected, disable distributed training.
+    Completely disable distributed training for single-GPU.
     """
-    if th.cuda.device_count() <= 1:  # Check if we have only one GPU
-        print("Single GPU detected. Skipping distributed training setup.")
-        th.cuda.set_device(0)  # Ensure GPU 0 is used
-        return
-
-    # If multiple GPUs exist, proceed with distributed training setup
+    import torch as th
     th.cuda.set_device(local_rank)
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{local_rank}"
-    dist.init_process_group(backend='nccl', init_method="env://")
+
+    # 🚀 Fully disable distributed training
+    print("🚨 Distributed training disabled. Running on a single GPU.")
+
+
 
 
 def dev():
@@ -46,6 +44,7 @@ def load_state_dict(path, **kwargs):
     """
     Load a PyTorch file
     """
+
     with bf.BlobFile(path, "rb") as f:
         data = f.read()
 
@@ -55,18 +54,13 @@ def load_state_dict(path, **kwargs):
 def sync_params(params):
     """
     Synchronize a sequence of Tensors across ranks from rank 0.
-    Only applicable in a multi-GPU environment.
     """
-    if th.cuda.device_count() > 1 and dist.is_initialized():
-        for p in params:
-            with th.no_grad():
-                dist.broadcast(p, 0)
+    for p in params:
+        with th.no_grad():
+            dist.broadcast(p, 0)
 
 
 def _find_free_port():
-    """
-    Find an available port for distributed training.
-    """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("", 0))
