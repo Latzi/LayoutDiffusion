@@ -34,7 +34,8 @@ def main():
 
     dist_util.setup_dist(local_rank=cfg.local_rank)
     logger.configure(dir=cfg.train.log_dir)
-    logger.log('current rank == {}, total_num = {}, \n, {}'.format(dist.get_rank(), dist.get_world_size(), cfg))
+    #logger.log('current rank == {}, total_num = {}, \n, {}'.format(dist.get_rank(), dist.get_world_size(), cfg))
+    logger.log('Running on a single GPU. Config: \n{}'.format(cfg))
 
     logger.log("creating model...")
     model = build_model(cfg)
