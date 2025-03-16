@@ -16,9 +16,6 @@ from layout_diffusion.dataset.data_loader import build_loaders
 from layout_diffusion.respace import build_diffusion
 
 
-
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=0)
@@ -32,9 +29,10 @@ def main():
         cfg = OmegaConf.merge(cfg, unknown_args)
     print(OmegaConf.to_yaml(cfg))
 
+    # 🚀 Disable distributed training (Single GPU mode)
     dist_util.setup_dist(local_rank=cfg.local_rank)
+
     logger.configure(dir=cfg.train.log_dir)
-    #logger.log('current rank == {}, total_num = {}, \n, {}'.format(dist.get_rank(), dist.get_world_size(), cfg))
     logger.log('Running on a single GPU. Config: \n{}'.format(cfg))
 
     logger.log("creating model...")
@@ -51,6 +49,10 @@ def main():
     logger.log("creating data loader...")
     train_loader = build_loaders(cfg, mode='train')
 
+    # ✅ Remove `find_unused_parameters` to avoid `TypeError`
+    train_config = dict(cfg.train)
+    train_config.pop("find_unused_parameters", None)  # Remove if it exists
+
     logger.log("training...")
     trainer = TrainLoop(
         model=model,
@@ -58,7 +60,7 @@ def main():
         schedule_sampler=schedule_sampler,
         data=loopy(train_loader),
         batch_size=cfg.data.parameters.train.batch_size,
-        **cfg.train
+        **train_config  # Pass the updated config without `find_unused_parameters`
     )
     trainer.run_loop()
 
