@@ -447,8 +447,12 @@ def mpi_weighted_mean(comm, local_name2valcount):
 
 def configure(dir=None, format_strs=None, comm=None, log_suffix=""):
     """
-    If comm is provided, average all numerical stats across that comm
+    Disable `torch.distributed` to prevent multi-GPU errors.
     """
+    import os
+    import tempfile
+    import datetime
+
     if dir is None:
         dir = os.getenv("OPENAI_LOGDIR")
     if dir is None:
@@ -460,21 +464,20 @@ def configure(dir=None, format_strs=None, comm=None, log_suffix=""):
     dir = os.path.expanduser(dir)
     os.makedirs(os.path.expanduser(dir), exist_ok=True)
 
-    rank = dist.get_rank()
-    if rank > 0:
-        log_suffix = log_suffix + "-rank%03i" % rank
+    # 🚀 Fully disable distributed training
+    rank = 0  # Force rank to be 0 to avoid calling `dist.get_rank()`
+    log_suffix = log_suffix + "-rank%03i" % rank if rank > 0 else log_suffix
 
     if format_strs is None:
-        if rank == 0:
-            format_strs = os.getenv("OPENAI_LOG_FORMAT", "stdout,log,csv").split(",")
-        else:
-            format_strs = os.getenv("OPENAI_LOG_FORMAT_MPI", "log").split(",")
+        format_strs = os.getenv("OPENAI_LOG_FORMAT", "stdout,log,csv").split(",")
+
     format_strs = filter(None, format_strs)
     output_formats = [make_output_format(f, dir, log_suffix) for f in format_strs]
 
     Logger.CURRENT = Logger(dir=dir, output_formats=output_formats, comm=comm)
     if output_formats:
-        log("Logging to %s" % dir)
+        print(f"Logging to {dir}")  # Replace `log()` with `print()` to prevent errors
+
 
 
 def _configure_default_logger():
@@ -498,4 +501,3 @@ def scoped_configure(dir=None, format_strs=None, comm=None):
     finally:
         Logger.CURRENT.close()
         Logger.CURRENT = prevlogger
-
