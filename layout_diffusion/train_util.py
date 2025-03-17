@@ -184,14 +184,43 @@ class TrainLoop:
     def save(self):
         try:
             save_path = os.path.join(self.log_dir, f"model{self.step:07d}.pt")
-            state_dict = self.mp_trainer.master_params_to_state_dict(self.model.state_dict())
+            print(f"💾 DEBUG: Preparing to save model at step {self.step}...")
 
-            # ✅ Validate state_dict before saving
-            for name, param in self.model.named_parameters():
-                if isinstance(param, str) or param is None:
-                    print(f"🚨 ERROR: Parameter {name} is invalid (Type: {type(param)})")
-                    raise ValueError(f"🔥 Corrupt Parameter: {name} (Invalid Type)")
+            print("🔍 DEBUG: Checking model parameters before saving...")
+            
+            # ✅ Extract state_dict from model
+            raw_state_dict = self.model.state_dict()
+            print(f"✅ DEBUG: Extracted raw state_dict.")
 
+            # 🚨 Check raw_state_dict before conversion
+            found_issue = False
+            for param_name, param_value in raw_state_dict.items():
+                if not isinstance(param_value, th.Tensor):
+                    print(f"🚨 ERROR: {param_name} is {type(param_value)} instead of Tensor!")
+                    found_issue = True
+
+            if found_issue:
+                raise ValueError("❌ ERROR: At least one parameter in raw_state_dict is invalid!")
+
+            print("🔍 DEBUG: Converting state_dict using master_params_to_state_dict...")
+
+            # ✅ Wrap the conversion in a try-except block
+            try:
+                state_dict = self.mp_trainer.master_params_to_state_dict(raw_state_dict)
+                print("✅ DEBUG: Successfully converted state_dict!")
+            except Exception as e:
+                print(f"🔥 ERROR INSIDE master_params_to_state_dict(): {e}")
+                print(f"🔍 DEBUG: Checking which parameter is causing the issue...")
+
+                for param_name, param_value in raw_state_dict.items():
+                    try:
+                        _ = param_value.view(-1)  # Try using `.view()` on the parameter
+                    except AttributeError:
+                        print(f"🚨 ERROR: {param_name} is not a tensor, but a {type(param_value)}")
+
+                raise ValueError("🔥 master_params_to_state_dict() failed due to invalid parameter.")
+
+            print(f"💾 DEBUG: Saving model to {save_path}...")
             with open(save_path, "wb") as f:
                 th.save(state_dict, f)
 
