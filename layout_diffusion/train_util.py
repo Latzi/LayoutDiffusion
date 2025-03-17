@@ -1,5 +1,4 @@
 import copy
-import functools
 import os
 
 import blobfile as bf
@@ -10,13 +9,12 @@ from torch.optim import AdamW
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
-from layout_diffusion.resample import LossAwareSampler, UniformSampler
+from layout_diffusion.resample import UniformSampler
 from tqdm import tqdm
 import numpy as np
-from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
+from diffusers.models import AutoencoderKL
 
 INITIAL_LOG_LOSS_SCALE = 20.0
-from diffusers.models import AutoencoderKL
 
 class TrainLoop:
     def __init__(
@@ -50,6 +48,7 @@ class TrainLoop:
         logger.configure(dir=log_dir)
         self.model = model
         self.pretrained_model_path = pretrained_model_path
+
         if pretrained_model_path:
             logger.log(f"loading model from {pretrained_model_path}")
             try:
@@ -88,6 +87,7 @@ class TrainLoop:
         self.sync_cuda = th.cuda.is_available()
 
         self._load_and_sync_parameters()
+
         self.mp_trainer = MixedPrecisionTrainer(
             model=self.model,
             use_fp16=self.use_fp16,
@@ -109,26 +109,17 @@ class TrainLoop:
                 for _ in range(len(self.ema_rate))
             ]
 
-        # ✅ Disable Distributed Training (No DDP)
         self.use_ddp = False
-        self.ddp_model = self.model  # Use model directly
+        self.ddp_model = self.model
 
         self.classifier_free = classifier_free
         self.classifier_free_dropout = classifier_free_dropout
-        self.dropout_condition = False
 
         self.scale_factor = scale_factor
         self.vae_root_dir = vae_root_dir
         self.latent_diffusion = latent_diffusion
         if self.latent_diffusion:
             self.instantiate_first_stage()
-
-    def instantiate_first_stage(self):
-        model = AutoencoderKL.from_pretrained(self.vae_root_dir).to(dist_util.dev())
-        self.first_stage_model = model.eval()
-        self.first_stage_model.train = False
-        for param in self.first_stage_model.parameters():
-            param.requires_grad = False
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = self.resume_checkpoint
@@ -144,20 +135,24 @@ class TrainLoop:
             )
 
     def run_loop(self):
+        print(f"🚀 Training started with batch size {self.batch_size}, learning rate {self.lr}")
+
         for _ in tqdm(range(self.lr_anneal_steps or 1_000_000)):
             batch, cond = next(self.data)
             self.run_step(batch, cond)
-            if self.step % self.log_interval == 0:
-                logger.dumpkvs()
+
             if self.step % self.save_interval == 0 and self.step > 0:
                 self.save()
+
             self.step += 1
 
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
         took_step = self.mp_trainer.optimize(self.opt)
+
         if took_step:
             self._update_ema()
+
         self._anneal_lr()
         self.log_step()
 
@@ -165,46 +160,51 @@ class TrainLoop:
         self.mp_trainer.zero_grad()
         micro = batch.to(dist_util.dev())
 
-        micro_cond = {}
-        for k, v in cond.items():
-            if k == "obj_class_name":
-                continue  # ✅ Ignore `obj_class_name` completely to suppress warnings
-            
-            if isinstance(v, str) or v is None:
-                continue  # ❌ Skip strings and None values
-            
-            elif isinstance(v, list):
-                try:
-                    if all(isinstance(item, str) for item in v):
-                        micro_cond[k] = v  # Keep as list (avoid tensor conversion)
-                    else:
-                        micro_cond[k] = torch.tensor(v, device=dist_util.dev(), dtype=torch.float32)
-                except ValueError:
-                    continue  # ✅ Silently skip incompatible lists
-            
-            elif isinstance(v, np.ndarray):  # ✅ Handle numpy arrays
-                micro_cond[k] = torch.from_numpy(v).to(dist_util.dev()).float()
-            
-            elif isinstance(v, torch.Tensor):  # ✅ Handle existing tensors
-                micro_cond[k] = v.to(dist_util.dev())
-            
-            else:
-                continue  # ✅ Skip unknown types silently (no warning)
+        micro_cond = {k: v.to(dist_util.dev()) if isinstance(v, torch.Tensor) else v for k, v in cond.items() if k != "obj_class_name"}
 
         t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
         losses = self.diffusion.training_losses(self.model, micro, t, model_kwargs=micro_cond)
         loss = (losses["loss"] * weights).mean()
+
+        # ✅ Compute gradients
+        grad_norm = th.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+        # ✅ Save grad_norm and other parameters only on save steps
+        if self.step % self.save_interval == 0 and self.step > 0:
+            print("\n----------------------------")
+            print(f"| step          | {self.step:<8} |")
+            print(f"| grad_norm     | {grad_norm:<8.2f} |")
+            print(f"| lg_loss_scale | {INITIAL_LOG_LOSS_SCALE:<8} |")
+            print(f"| param_norm    | {sum(p.norm().item() for p in self.model.parameters() if p is not None):<8.2f} |")
+            print(f"| samples       | {self.step * self.batch_size:<8} |")
+            print("----------------------------\n")
+
         self.mp_trainer.backward(loss)
 
+    def save(self):
+        try:
+            save_path = os.path.join(self.log_dir, f"model{self.step:07d}.pt")
+            state_dict = self.mp_trainer.master_params_to_state_dict(self.model.state_dict())
 
+            # ✅ Validate state_dict before saving
+            for name, param in self.model.named_parameters():
+                if isinstance(param, str) or param is None:
+                    print(f"🚨 ERROR: Parameter {name} is invalid (Type: {type(param)})")
+                    raise ValueError(f"🔥 Corrupt Parameter: {name} (Invalid Type)")
+
+            with open(save_path, "wb") as f:
+                th.save(state_dict, f)
+
+            print(f"✅ Model successfully saved at: {save_path}")
+
+        except Exception as e:
+            print(f"🚨 ERROR DURING SAVE: {e} | Skipping save but continuing training.")
 
     def _update_ema(self):
-        """✅ Fix: Add missing function `_update_ema()`"""
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.mp_trainer.master_params, rate=rate)
 
     def _anneal_lr(self):
-        """✅ Fix: Add missing function `_anneal_lr()`"""
         if not self.lr_anneal_steps:
             return
         frac_done = (self.step + self.resume_step) / self.lr_anneal_steps
@@ -213,24 +213,6 @@ class TrainLoop:
             param_group["lr"] = lr
 
     def log_step(self):
-        """✅ Fix: Add missing function `log_step()`"""
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
-    def save(self):
-        state_dict = self.mp_trainer.master_params_to_state_dict(self.model.state_dict())
-        with bf.BlobFile(bf.join(get_blob_logdir(), f"model{self.step:07d}.pt"), "wb") as f:
-            th.save(state_dict, f)
-
-def parse_resume_step_from_filename(filename):
-    split = filename.split("model")
-    if len(split) < 2:
-        return 0
-    split1 = split[-1].split(".")[0]
-    try:
-        return int(split1)
-    except ValueError:
-        return 0
-
-def get_blob_logdir():
-    return logger.get_dir()
