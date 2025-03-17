@@ -69,7 +69,7 @@ data:
     min_object_size: 0.02
     min_objects_per_image: 3
     max_objects_per_image: 8
-    stuff_only: True
+    stuff_only: False
     used_condition_types: [ 'obj_class','obj_bbox' ]
     return_origin_image: False
 
@@ -116,7 +116,7 @@ train:
   lr: 1e-5
   ema_rate: "0.9999"
   micro_batch_size: 1
-  save_interval: 10000
+  save_interval: 1000
   log_interval: 1000
   log_dir: '/content/logfiles'
   use_fp16: True
