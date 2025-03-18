@@ -1,20 +1,32 @@
 import copy
+import functools
 import os
 
 import blobfile as bf
 import torch as th
-import torch
+from torch.nn.parallel import DataParallel  # ✅ Use DataParallel instead of DDP
 from torch.optim import AdamW
 
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
-from layout_diffusion.resample import UniformSampler
+from layout_diffusion.resample import LossAwareSampler, UniformSampler
 from tqdm import tqdm
+import torch
 import numpy as np
-from diffusers.models import AutoencoderKL
+from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
 
+def log_loss_dict(diffusion, ts, losses):
+    for key, values in losses.items():
+        logger.logkv_mean(key, values.mean().item())
+        # Log the quantiles (four quartiles, in particular).
+        for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
+            quartile = int(4 * sub_t / diffusion.num_timesteps)
+            logger.logkv_mean(f"{key}_q{quartile}", sub_loss)
+
+# For ImageNet experiments, this was a good default value.
 INITIAL_LOG_LOSS_SCALE = 20.0
+from diffusers.models import AutoencoderKL
 
 class TrainLoop:
     def __init__(
@@ -35,6 +47,7 @@ class TrainLoop:
             schedule_sampler=None,
             weight_decay=0.0,
             lr_anneal_steps=0,
+            find_unused_parameters=False,
             only_update_parameters_that_require_grad=False,
             classifier_free=False,
             classifier_free_dropout=0.0,
@@ -48,17 +61,16 @@ class TrainLoop:
         logger.configure(dir=log_dir)
         self.model = model
         self.pretrained_model_path = pretrained_model_path
-
         if pretrained_model_path:
             logger.log(f"loading model from {pretrained_model_path}")
             try:
                 model.load_state_dict(
-                    dist_util.load_state_dict(pretrained_model_path, map_location="cpu"), strict=True
+                    th.load(pretrained_model_path, map_location="cpu"), strict=True
                 )
             except:
                 print('Could not load full model, attempting partial load.')
                 model.load_state_dict(
-                    dist_util.load_state_dict(pretrained_model_path, map_location="cpu"), strict=False
+                    th.load(pretrained_model_path, map_location="cpu"), strict=False
                 )
 
         self.diffusion = diffusion
@@ -82,12 +94,11 @@ class TrainLoop:
 
         self.step = 0
         self.resume_step = 0
-        self.global_batch = self.batch_size
+        self.global_batch = self.batch_size  # ✅ Single GPU, no need for world_size
 
         self.sync_cuda = th.cuda.is_available()
 
         self._load_and_sync_parameters()
-
         self.mp_trainer = MixedPrecisionTrainer(
             model=self.model,
             use_fp16=self.use_fp16,
@@ -109,11 +120,16 @@ class TrainLoop:
                 for _ in range(len(self.ema_rate))
             ]
 
-        self.use_ddp = False
-        self.ddp_model = self.model
+        if th.cuda.is_available():
+            self.use_ddp = False  # ✅ Disable DDP
+            self.ddp_model = DataParallel(self.model)  # ✅ Use DataParallel
+        else:
+            logger.warn("Training without GPU may be slow!")
+            self.ddp_model = self.model
 
         self.classifier_free = classifier_free
         self.classifier_free_dropout = classifier_free_dropout
+        self.dropout_condition = False
 
         self.scale_factor = scale_factor
         self.vae_root_dir = vae_root_dir
@@ -128,18 +144,21 @@ class TrainLoop:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
             logger.log(f"Resume step = {self.resume_step}")
             logger.log(f"Loading model from checkpoint: {resume_checkpoint}")
-            self.model.load_state_dict(
-                dist_util.load_state_dict(
-                    resume_checkpoint, map_location=dist_util.dev()
-                )
-            )
+            self.model.load_state_dict(th.load(resume_checkpoint, map_location="cpu"))
 
     def run_loop(self):
-        print(f"🚀 Training started with batch size {self.batch_size}, learning rate {self.lr}")
+        def run_loop_generator():
+            while (
+                    not self.lr_anneal_steps
+                    or self.step + self.resume_step < self.lr_anneal_steps
+            ):
+                yield
 
-        for _ in tqdm(range(self.lr_anneal_steps or 1_000_000)):
+        for _ in tqdm(run_loop_generator()):
             batch, cond = next(self.data)
             self.run_step(batch, cond)
+            if self.step % self.log_interval == 0:
+                logger.dumpkvs()
 
             if self.step % self.save_interval == 0 and self.step > 0:
                 self.save()
@@ -149,85 +168,53 @@ class TrainLoop:
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
         took_step = self.mp_trainer.optimize(self.opt)
-
         if took_step:
             self._update_ema()
-
         self._anneal_lr()
         self.log_step()
 
     def forward_backward(self, batch, cond):
         self.mp_trainer.zero_grad()
-        micro = batch.to(dist_util.dev())
+        for i in range(0, batch.shape[0], self.micro_batch_size):
+            micro = batch[i: i + self.micro_batch_size].to("cuda")  # ✅ Force GPU usage
+            if self.latent_diffusion:
+                micro = self.get_first_stage_encoding(micro).detach()
+            micro_cond = {
+                k: v[i: i + self.micro_batch_size].to("cuda")
+                for k, v in cond.items() if k in self.model.layout_encoder.used_condition_types
+            }
+            last_batch = (i + self.micro_batch_size) >= batch.shape[0]
+            t, weights = self.schedule_sampler.sample(micro.shape[0], "cuda")
 
-        micro_cond = {k: v.to(dist_util.dev()) if isinstance(v, torch.Tensor) else v for k, v in cond.items() if k != "obj_class_name"}
+            compute_losses = functools.partial(
+                self.diffusion.training_losses,
+                self.ddp_model,
+                micro,
+                t,
+                model_kwargs=micro_cond,
+            )
 
-        t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
-        losses = self.diffusion.training_losses(self.model, micro, t, model_kwargs=micro_cond)
-        loss = (losses["loss"] * weights).mean()
+            if last_batch or not self.use_ddp:
+                losses = compute_losses()
+            else:
+                with self.ddp_model.no_sync():
+                    losses = compute_losses()
 
-        # ✅ Compute gradients
-        grad_norm = th.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            if isinstance(self.schedule_sampler, LossAwareSampler):
+                self.schedule_sampler.update_with_local_losses(
+                    t, losses["loss"].detach()
+                )
 
-        # ✅ Save grad_norm and other parameters only on save steps
-        if self.step % self.save_interval == 0 and self.step > 0:
-            print("\n----------------------------")
-            print(f"| step          | {self.step:<8} |")
-            print(f"| grad_norm     | {grad_norm:<8.2f} |")
-            print(f"| lg_loss_scale | {INITIAL_LOG_LOSS_SCALE:<8} |")
-            print(f"| param_norm    | {sum(p.norm().item() for p in self.model.parameters() if p is not None):<8.2f} |")
-            print(f"| samples       | {self.step * self.batch_size:<8} |")
-            print("----------------------------\n")
-
-        self.mp_trainer.backward(loss)
+            loss = (losses["loss"] * weights).mean()
+            log_loss_dict(
+                self.diffusion, t, {k: v * weights for k, v in losses.items()}
+            )
+            self.mp_trainer.backward(loss)
 
     def save(self):
-        try:
-            save_path = os.path.join(self.log_dir, f"model{self.step:07d}.pt")
-            print(f"💾 DEBUG: Preparing to save model at step {self.step}...")
-
-            print("🔍 DEBUG: Checking model parameters before saving...")
-            
-            # ✅ Extract state_dict from model
-            raw_state_dict = self.model.state_dict()
-            print(f"✅ DEBUG: Extracted raw state_dict.")
-
-            # 🚨 Check raw_state_dict before conversion
-            found_issue = False
-            for param_name, param_value in raw_state_dict.items():
-                if not isinstance(param_value, th.Tensor):
-                    print(f"🚨 ERROR: {param_name} is {type(param_value)} instead of Tensor!")
-                    found_issue = True
-
-            if found_issue:
-                raise ValueError("❌ ERROR: At least one parameter in raw_state_dict is invalid!")
-
-            print("🔍 DEBUG: Converting state_dict using master_params_to_state_dict...")
-
-            # ✅ Wrap the conversion in a try-except block
-            try:
-                state_dict = self.mp_trainer.master_params_to_state_dict(raw_state_dict)
-                print("✅ DEBUG: Successfully converted state_dict!")
-            except Exception as e:
-                print(f"🔥 ERROR INSIDE master_params_to_state_dict(): {e}")
-                print(f"🔍 DEBUG: Checking which parameter is causing the issue...")
-
-                for param_name, param_value in raw_state_dict.items():
-                    try:
-                        _ = param_value.view(-1)  # Try using `.view()` on the parameter
-                    except AttributeError:
-                        print(f"🚨 ERROR: {param_name} is not a tensor, but a {type(param_value)}")
-
-                raise ValueError("🔥 master_params_to_state_dict() failed due to invalid parameter.")
-
-            print(f"💾 DEBUG: Saving model to {save_path}...")
-            with open(save_path, "wb") as f:
-                th.save(state_dict, f)
-
-            print(f"✅ Model successfully saved at: {save_path}")
-
-        except Exception as e:
-            print(f"🚨 ERROR DURING SAVE: {e} | Skipping save but continuing training.")
+        save_path = os.path.join(self.log_dir, f"model{self.step:07d}.pt")
+        th.save(self.model.state_dict(), save_path)
+        logger.log(f"✅ Model saved at {save_path}")
 
     def _update_ema(self):
         for rate, params in zip(self.ema_rate, self.ema_params):
@@ -244,4 +231,3 @@ class TrainLoop:
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
-
