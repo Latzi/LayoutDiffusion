@@ -70,7 +70,6 @@ def model_grads_to_master_grads(param_groups_and_shapes, master_params):
             [param_grad_or_zeros(param) for (_, param) in param_group]
         ).view(shape)
 
-
 def master_params_to_model_params(param_groups_and_shapes, master_params):
     """
     Copy the master parameter data back into the model parameters.
@@ -82,7 +81,6 @@ def master_params_to_model_params(param_groups_and_shapes, master_params):
             param_group, unflatten_master_params(param_group, master_param.view(-1))
         ):
             param.detach().copy_(unflat_master_param)
-
 
 def unflatten_master_params(param_group, master_param):
     return _unflatten_dense_tensors(master_param, [param for (_, param) in param_group])
@@ -99,7 +97,6 @@ def get_param_groups_and_shapes(named_model_params):
         (1, -1),
     )
     return [scalar_vector_named_params, matrix_named_params]
-
 
 def master_params_to_state_dict(
     model, param_groups_and_shapes, master_params, use_fp16
@@ -120,7 +117,6 @@ def master_params_to_state_dict(
             assert name in state_dict
             state_dict[name] = master_params[i]
     return state_dict
-
 
 def state_dict_to_master_params(model, state_dict, use_fp16):
     if use_fp16:
