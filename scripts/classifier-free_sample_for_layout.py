@@ -54,6 +54,15 @@ def save_image(img_tensor, path):
     imageio.imsave(path, img_tensor)
     print(f"✅ Image saved: {path}")
 
+def save_layout(metadata, path):
+    """
+    Saves bounding box (BB) layout as a JSON file.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(metadata, f, indent=4)
+    print(f"✅ Layout metadata saved: {path}")
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=0)
@@ -151,37 +160,35 @@ def main():
         imgs = imgs.to(dist_util.dev())
 
         for sample_idx in range(cfg.sample.sample_times):
-            if cfg.sample.sample_method == 'dpm_solver':
-                wrappered_model_fn = model_wrapper(model_fn, noise_schedule, is_cond_classifier=False, total_N=1000)
-                dpm_solver = DPM_Solver(wrappered_model_fn, noise_schedule)
+            sample_fn = diffusion.p_sample_loop if cfg.sample.sample_method == 'ddpm' else diffusion.ddim_sample_loop
+            all_results = sample_fn(
+                model_fn,
+                (imgs.shape[0], 3, cfg.data.parameters.image_size, cfg.data.parameters.image_size),
+                clip_denoised=cfg.sample.clip_denoised,
+                model_kwargs={
+                    'obj_class': cond['obj_class'].to(dist_util.dev()) if 'obj_class' in cond else torch.zeros((imgs.shape[0], 1), device=dist_util.dev()),
+                    'obj_bbox': cond['obj_bbox'].to(dist_util.dev()) if 'obj_bbox' in cond else torch.zeros((imgs.shape[0], 4), device=dist_util.dev()),
+                    'is_valid_obj': cond['is_valid_obj'].to(dist_util.dev()) if 'is_valid_obj' in cond else torch.ones((imgs.shape[0], 1), device=dist_util.dev()),
+                    'obj_mask': cond['obj_mask'].to(dist_util.dev()) if 'obj_mask' in cond else torch.zeros_like(imgs, device=dist_util.dev())
+                },
+                cond_fn=None,
+                device=dist_util.dev()
+            )
+            last_result = all_results[-1]
+            sample = last_result['sample'].clamp(-1, 1)
 
-                x_T = th.randn((imgs.shape[0], 3, cfg.data.parameters.image_size, cfg.data.parameters.image_size), 
-                               device=dist_util.dev())
-                sample = dpm_solver.sample(x_T, steps=int(cfg.sample.timestep_respacing[0]), eps=float(cfg.sample.eps),
-                                           adaptive_step_size=cfg.sample.adaptive_step_size, 
-                                           fast_version=cfg.sample.fast_version, clip_denoised=False, rtol=cfg.sample.rtol)
-                sample = sample.clamp(-1, 1)
-            elif cfg.sample.sample_method in ['ddpm', 'ddim']:
-                sample_fn = diffusion.p_sample_loop if cfg.sample.sample_method == 'ddpm' else diffusion.ddim_sample_loop
-                all_results = sample_fn(
-                    model_fn,
-                    (imgs.shape[0], 3, cfg.data.parameters.image_size, cfg.data.parameters.image_size),
-                    clip_denoised=cfg.sample.clip_denoised,
-                    model_kwargs={
-                        'obj_class': cond['obj_class'].to(dist_util.dev()) if 'obj_class' in cond else torch.zeros((imgs.shape[0], 1), device=dist_util.dev()),
-                        'obj_bbox': cond['obj_bbox'].to(dist_util.dev()) if 'obj_bbox' in cond else torch.zeros((imgs.shape[0], 4), device=dist_util.dev()),
-                        'is_valid_obj': cond['is_valid_obj'].to(dist_util.dev()) if 'is_valid_obj' in cond else torch.ones((imgs.shape[0], 1), device=dist_util.dev()),
-                        'obj_mask': cond['obj_mask'].to(dist_util.dev()) if 'obj_mask' in cond else torch.zeros_like(imgs, device=dist_util.dev())
-                    },
-                    cond_fn=None,
-                    device=dist_util.dev()
-                )
-                last_result = all_results[-1]
-                sample = last_result['sample'].clamp(-1, 1)
-            else:
-                raise NotImplementedError
+            # ✅ Save images and layouts with unique names
+            filename = f"generated_image_{batch_idx}_{sample_idx}.png"
+            save_path = os.path.join(log_dir, "generated_imgs", filename)
+            save_image(sample[0], save_path)
 
-            save_image(sample[0], os.path.join(log_dir, f"generated_image_{sample_idx}.png"))
+            # ✅ Save bounding boxes (BBs) in JSON
+            metadata_path = save_path.replace(".png", ".json")
+            save_layout({
+                "obj_class": cond['obj_class'][0].tolist(),
+                "obj_bbox": cond['obj_bbox'][0].tolist(),
+                "is_valid_obj": cond['is_valid_obj'][0].tolist()
+            }, metadata_path)
 
     logger.log("✅ Sampling complete!")
 
