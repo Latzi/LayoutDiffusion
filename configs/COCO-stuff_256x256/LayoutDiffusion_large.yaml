@@ -7,15 +7,15 @@ model:
     in_channels: 3
     out_channels: 6
     model_channels: 256
-    encoder_channels: 256 # assert same as layout_encoder.hidden_dim
+    encoder_channels: 256  # assert same as layout_encoder.hidden_dim
     num_head_channels: 64
     num_heads: -1
     num_heads_upsample: -1
     num_res_blocks: 2
     num_attention_blocks: 1
     resblock_updown: True
-    attention_ds: [ 32, 16, 8 ]
-    channel_mult: [ 1, 1, 2, 2, 4, 4 ]
+    attention_ds: [32, 16, 8]
+    channel_mult: [1, 1, 2, 2, 4, 4]
     dropout: 0.0
     use_checkpoint: False
     use_positional_embedding_for_attention: True
@@ -24,16 +24,14 @@ model:
     layout_encoder:
       type: layout_diffusion.layout_encoder.LayoutTransformerEncoder
       parameters:
-        used_condition_types: [
-          'obj_class', 'obj_bbox', 'is_valid_obj'
-        ]
+        used_condition_types: ['obj_class', 'obj_bbox', 'is_valid_obj']
         hidden_dim: 256
-        output_dim: 1024 # model_channels x 4
+        output_dim: 1024  # model_channels x 4
         num_layers: 6
         num_heads: 8
         use_final_ln: True
         use_positional_embedding: False
-        resolution_to_attention: [ 32, 16, 8 ]
+        resolution_to_attention: [32, 16, 8]
         use_key_padding_mask: False
 
 
@@ -45,8 +43,8 @@ diffusion:
     diffusion_steps: 1000
     noise_schedule: "linear"
     learn_sigma: True
-    timestep_respacing: [ 1000 ]
-    loss: [ "RESCALED_MSE" ]
+    timestep_respacing: [1000]
+    loss: ["RESCALED_MSE"]
 
 schedule_sampler:
   type: layout_diffusion.resample.UniformSampler
@@ -55,10 +53,10 @@ data:
   type: 'COCO-stuff'
   parameters:
     filter_mode: 'LostGAN'
-    use_deprecated_stuff2017: True
+    use_deprecated_stuff2017: False
     image_size: 256
     layout_length: 10
-    num_classes_for_layout_object: 185
+    num_classes_for_layout_object: 186
     mask_size_for_layout_object: 32
     loader_num_workers: 4
     include_relationships: False
@@ -70,29 +68,32 @@ data:
     min_objects_per_image: 3
     max_objects_per_image: 8
     stuff_only: False
-    used_condition_types: [ 'obj_class','obj_bbox' ]
+    used_condition_types: ['obj_class','obj_bbox']
     return_origin_image: False
 
     train:
-      image_dir: 'images/train2017'
-      instances_json: 'annotations/instances_train2017.json'
-      stuff_json: 'annotations/stuff_train2017.json'
-      deprecated_stuff_ids_txt: 'annotations/deprecated-challenge2017/train-ids.txt'
+      image_dir: 'images/train'
+      instances_json: 'annotations/train.json'
+      stuff_json: 'annotations/train.json'
+      # DUMMY KEY so Hydra does not complain:
+      deprecated_stuff_ids_txt: ''
       max_num_samples: null
-      specific_image_ids: [ ]
+      specific_image_ids: []
       shuffle: True
-      batch_size: 4           # 8 GPUs, total_batch_size=4x8=32
+      batch_size: 4
       left_right_flip: True
       use_MinIoURandomCrop: True
+
     val:
-      image_dir: 'images/val2017'
-      instances_json: 'annotations/instances_val2017.json'
-      stuff_json: 'annotations/stuff_val2017.json'
-      deprecated_stuff_ids_txt: 'annotations/deprecated-challenge2017/val-ids.txt'
+      image_dir: 'images/val'
+      instances_json: 'annotations/val.json'
+      stuff_json: 'annotations/val.json'
+      # DUMMY KEY so Hydra does not complain:
+      deprecated_stuff_ids_txt: ''
       max_num_samples: 1024
-      specific_image_ids: [ ]
+      specific_image_ids: []
       shuffle: False
-      batch_size: 8
+      batch_size: 4
       left_right_flip: False
       use_MinIoURandomCrop: False
 
@@ -100,9 +101,8 @@ data:
       image_dir: 'images/val2017'
       instances_json: 'annotations/instances_val2017.json'
       stuff_json: 'annotations/stuff_val2017.json'
-      deprecated_stuff_ids_txt: 'annotations/deprecated-challenge2017/val-ids.txt'
       max_num_samples: null
-      specific_image_ids: [ ]
+      specific_image_ids: []
       shuffle: False
       batch_size: 32
       left_right_flip: False
@@ -116,7 +116,7 @@ train:
   lr: 1e-5
   ema_rate: "0.9999"
   micro_batch_size: 1
-  save_interval: 1000
+  save_interval: 10000
   log_interval: 1000
   log_dir: '/content/logfiles'
   use_fp16: True
@@ -135,7 +135,7 @@ sample:
   classifier_free: True
   classifier_free_scale: 1.0
   sample_times: 1
-  timestep_respacing: [ 200 ]
+  timestep_respacing: [200]
   sample_method: 'ddpm'
   clip_denoised: True
   save_cropped_images: False
