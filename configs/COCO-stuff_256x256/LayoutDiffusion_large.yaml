@@ -56,7 +56,7 @@ data:
     use_deprecated_stuff2017: False
     image_size: 256
     layout_length: 10
-    num_classes_for_layout_object: 186
+    num_classes_for_layout_object: 45
     mask_size_for_layout_object: 32
     loader_num_workers: 4
     include_relationships: False
