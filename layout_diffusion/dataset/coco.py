@@ -214,7 +214,7 @@ class CocoSceneGraphDataset(Dataset):
         self.vocab['object_name_to_idx']['__image__'] = 0
 
         # None for 184
-        self.vocab['object_name_to_idx']['__null__'] = 184
+        self.vocab['object_name_to_idx']['__null__'] = 44
 
         # Build object_idx_to_name
         name_to_idx = self.vocab['object_name_to_idx']
