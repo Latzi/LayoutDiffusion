@@ -29,6 +29,34 @@ INITIAL_LOG_LOSS_SCALE = 20.0
 from diffusers.models import AutoencoderKL
 
 class TrainLoop:
+    @staticmethod
+    def parse_resume_step_from_filename(filename):
+        """
+        Parse filenames of the form path/to/modelNNNNNN.pt,
+        where NNNNNN is the checkpoint's number of steps.
+        """
+        split = filename.split("model")
+        if len(split) < 2:
+            return 0
+        split1 = split[-1].split(".")[0]
+        try:
+            return int(split1)
+        except ValueError:
+            return 0
+
+    def _load_ema_parameters(self, rate):
+        # If you have an EMA state saved separately, load it here.
+        # Otherwise, return a copy of the current master parameters.
+        return copy.deepcopy(self.mp_trainer.master_params)        
+
+    def _load_optimizer_state(self):
+        # Example: if you saved the optimizer state in a file named like your model checkpoint
+        optimizer_state_path = self.resume_checkpoint.replace("model", "opt")
+        if os.path.exists(optimizer_state_path):
+            self.opt.load_state_dict(th.load(optimizer_state_path, map_location="cpu"))
+            logger.log(f"✅ Optimizer state loaded from {optimizer_state_path}")
+        else:
+            logger.log(f"⚠️ Optimizer state file not found: {optimizer_state_path}")
     def __init__(
             self,
             *,
@@ -141,7 +169,7 @@ class TrainLoop:
         resume_checkpoint = self.resume_checkpoint
 
         if resume_checkpoint:
-            self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
+            self.resume_step = self.parse_resume_step_from_filename(resume_checkpoint)
             logger.log(f"Resume step = {self.resume_step}")
             logger.log(f"Loading model from checkpoint: {resume_checkpoint}")
             self.model.load_state_dict(th.load(resume_checkpoint, map_location="cpu"))
@@ -212,9 +240,13 @@ class TrainLoop:
             self.mp_trainer.backward(loss)
 
     def save(self):
-        save_path = os.path.join(self.log_dir, f"model{self.step:07d}.pt")
-        th.save(self.model.state_dict(), save_path)
-        logger.log(f"✅ Model saved at {save_path}")
+        model_save_path = os.path.join(self.log_dir, f"model{self.step:07d}.pt")
+        opt_save_path = os.path.join(self.log_dir, f"opt{self.step:07d}.pt")
+        th.save(self.model.state_dict(), model_save_path)
+        th.save(self.opt.state_dict(), opt_save_path)
+        logger.log(f"✅ Model saved at {model_save_path}")
+        logger.log(f"✅ Optimizer state saved at {opt_save_path}")
+
 
     def _update_ema(self):
         for rate, params in zip(self.ema_rate, self.ema_params):
