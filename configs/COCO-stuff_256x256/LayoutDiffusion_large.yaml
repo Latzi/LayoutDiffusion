@@ -98,9 +98,9 @@ data:
       use_MinIoURandomCrop: False
 
     test:
-      image_dir: 'images/val2017'
-      instances_json: 'annotations/instances_val2017.json'
-      stuff_json: 'annotations/stuff_val2017.json'
+      image_dir: 'images/val'
+      instances_json: 'annotations/val.json'
+      stuff_json: 'annotations/val.json'
       deprecated_stuff_ids_txt: ''  # ✅ Add this line to avoid errors
       max_num_samples: null
       specific_image_ids: []
@@ -132,7 +132,7 @@ sample:
   use_fp16: True
   log_root: '/content/logfiles'
   sample_suffix: 'model1150000'
-  pretrained_model_path: './pretrained_models/model0036000.pt'
+  pretrained_model_path: './pretrained_models/model0040000.pt'
   classifier_free: True
   classifier_free_scale: 1.0
   sample_times: 1
